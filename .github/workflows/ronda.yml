@@ -1,0 +1,77 @@
+name: ronda-codex
+on:
+  schedule:
+    - cron: "7 * * * *"
+  workflow_dispatch:
+    inputs:
+      modelo:
+        default: gpt-6.2-sol
+permissions:
+  contents: read
+  actions: write
+concurrency:
+  group: codex
+  cancel-in-progress: false
+jobs:
+  ronda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      AUTH_KEY: ${{ secrets.AUTH_KEY }}
+      MODELO: ${{ inputs.modelo || 'gpt-6.2-sol' }}
+    steps:
+      - name: Restaurar sesion cifrada
+        uses: actions/cache/restore@v4
+        with:
+          path: auth.enc
+          key: codex-auth-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: codex-auth-
+      - name: Preparar
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.codex ~/.ssh && chmod 700 ~/.codex ~/.ssh
+          if [ -f auth.enc ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass env:AUTH_KEY -in auth.enc -out ~/.codex/auth.json
+            echo "sesion: la guardada"
+          else
+            printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
+            echo "sesion: la semilla"
+          fi
+          chmod 600 ~/.codex/auth.json
+          printf 'cli_auth_credentials_store = "file"\n' > ~/.codex/config.toml
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git clone -q --filter=blob:none git@github.com:gomez5757/duendi.git w
+          git -C w config user.name "Codex nube"
+          git -C w config user.email "codex-nube@users.noreply.github.com"
+          npm i -g @openai/codex@0.172.0 > /dev/null 2>&1
+      - name: Ronda
+        run: |
+          cd w
+          if git cat-file -e origin/main:pc/fabrica/PARADA-CODEX 2>/dev/null; then echo "parada"; exit 0; fi
+          set +e
+          codex exec --dangerously-bypass-approvals-and-sandbox -m "$MODELO" -c model_reasoning_effort=medium \
+            -o ../final.txt "Lee pc/docs/codex-nube.md en origin/main y haz una ronda siguiendolo al pie de la letra." > ../log.txt 2>&1
+          echo "codex termino con $?"
+          git ls-remote origin 'refs/heads/wip/nube-codex-*' | wc -l | sed 's/^/ramas codex: /'
+      - name: Guardar sesion e informe cifrados
+        if: always()
+        run: |
+          rm -f auth.enc
+          [ -f ~/.codex/auth.json ] && openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:AUTH_KEY -in ~/.codex/auth.json -out auth.enc
+          touch final.txt log.txt
+          tar czf - final.txt log.txt | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:AUTH_KEY -out informe.enc
+      - uses: actions/cache/save@v4
+        if: always() && hashFiles('auth.enc') != ''
+        with:
+          path: auth.enc
+          key: codex-auth-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: informe
+          path: informe.enc
+          retention-days: 7
