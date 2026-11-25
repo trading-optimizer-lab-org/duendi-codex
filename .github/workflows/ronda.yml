@@ -4,21 +4,20 @@ on:
     - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
-      modelo:
-        default: gpt-6.2-sol
+      maximo:
+        description: agentes a la vez como mucho
+        default: "40"
 permissions:
   contents: read
   actions: write
-concurrency:
-  group: codex
-  cancel-in-progress: false
 jobs:
   ronda:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
       AUTH_KEY: ${{ secrets.AUTH_KEY }}
-      MODELO: ${{ inputs.modelo || 'gpt-6.2-sol' }}
+      MAXIMO: ${{ inputs.maximo || '40' }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Restaurar sesion cifrada
         uses: actions/cache/restore@v4
@@ -41,6 +40,7 @@ jobs:
             echo "sesion: la semilla"
           fi
           chmod 600 ~/.codex/auth.json
+          sha256sum ~/.codex/auth.json | cut -c1-64 > auth0.sha
           printf 'cli_auth_credentials_store = "file"\n' > ~/.codex/config.toml
           printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
@@ -48,24 +48,69 @@ jobs:
           git -C w config user.name "Codex nube"
           git -C w config user.email "codex-nube@users.noreply.github.com"
           npm i -g @openai/codex@0.172.0 > /dev/null 2>&1
-      - name: Ronda
+      - name: Elegir y reservar un trabajo
         run: |
           cd w
-          if git cat-file -e origin/main:pc/fabrica/PARADA-CODEX 2>/dev/null; then echo "parada"; exit 0; fi
-          antes=$(git ls-remote origin 'refs/heads/wip/nube-codex-*' | wc -l)
+          if git cat-file -e origin/main:pc/fabrica/PARADA-CODEX 2>/dev/null; then echo "parada"; echo "PARADA=1" >> "$GITHUB_ENV"; exit 0; fi
+          git show origin/main:pc/fabrica/cola-codex.txt | grep -v '^#' | grep '|' > ../cola.txt || true
+          while IFS='|' read -r id chat tipo partida notas modelo; do
+            id=$(echo $id | tr 'A-Z' 'a-z'); partida=$(echo $partida); modelo=$(echo $modelo)
+            [ -z "$id" ] && continue
+            git ls-remote --exit-code origin "refs/heads/wip/nube-codex-$id" >/dev/null 2>&1 && continue
+            base=$(git ls-remote origin "refs/heads/$partida" | cut -f1)
+            [ -z "$base" ] && continue
+            git fetch -q origin "$base" || continue
+            c=$(git commit-tree "$base^{tree}" -p "$base" -m "reserva $id")
+            if git push -q origin "$c:refs/heads/wip/nube-codex-$id" 2>/dev/null; then
+              echo "TRABAJO=$id" >> "$GITHUB_ENV"; echo "RESERVA=$c" >> "$GITHUB_ENV"
+              if [ "$modelo" = luna ]; then echo "MODELO=gpt-6.2-luna" >> "$GITHUB_ENV"; echo "ESFUERZO=max" >> "$GITHUB_ENV"
+              else echo "MODELO=gpt-6.2-sol" >> "$GITHUB_ENV"; echo "ESFUERZO=medium" >> "$GITHUB_ENV"; fi
+              echo "trabajo: $id, modelo: ${modelo:-sol}"
+              exit 0
+            fi
+          done < ../cola.txt
+          echo "trabajo: ninguno en la cola"
+      - name: Trabajar
+        if: env.PARADA != '1'
+        run: |
+          cd w
           set +e
-          codex exec --dangerously-bypass-approvals-and-sandbox -m "$MODELO" -c model_reasoning_effort=medium \
-            -o ../final.txt "Lee pc/docs/codex-nube.md en origin/main y haz una ronda siguiendolo al pie de la letra." > ../log.txt 2>&1
+          if [ -n "${TRABAJO:-}" ]; then
+            git fetch -q origin "wip/nube-codex-$TRABAJO"
+            git checkout -q -B "wip/nube-codex-$TRABAJO" FETCH_HEAD
+            P="Lee pc/docs/codex-nube.md en origin/main. El trabajo $TRABAJO de pc/fabrica/cola-codex.txt ya esta reservado para ti: estas en su rama wip/nube-codex-$TRABAJO, que sale de su rama de partida. Haz solo ese trabajo, con los pasos 4 a 6 de la hoja, y sube a esa misma rama."
+          else
+            MODELO=gpt-6.2-sol; ESFUERZO=medium
+            antes=$(git ls-remote origin 'refs/heads/wip/nube-codex-*' | wc -l)
+            P="Lee pc/docs/codex-nube.md en origin/main y haz una ronda siguiendolo al pie de la letra."
+          fi
+          codex exec --dangerously-bypass-approvals-and-sandbox -m "$MODELO" -c model_reasoning_effort="$ESFUERZO" -o ../final.txt "$P" > ../log.txt 2>&1
           fin=$?
-          echo "codex termino con $fin"
-          despues=$(git ls-remote origin 'refs/heads/wip/nube-codex-*' | wc -l)
-          echo "ramas codex: $despues, antes $antes"
-          if [ "$fin" = 0 ] && [ "$despues" -gt "$antes" ]; then echo "SEGUIR=1" >> "$GITHUB_ENV"; fi
+          if [ "$fin" != 0 ] && [ "$MODELO" = gpt-6.2-luna ] && grep -qi 'model' ../log.txt; then
+            echo "luna no disponible, sigo con sol medium"
+            codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-6.2-sol -c model_reasoning_effort=medium -o ../final.txt "$P" > ../log.txt 2>&1
+            fin=$?
+          fi
+          echo "codex termino con $fin, modelo $MODELO $ESFUERZO"
+          if [ -n "${TRABAJO:-}" ]; then
+            ahora=$(git ls-remote origin "refs/heads/wip/nube-codex-$TRABAJO" | cut -f1)
+            if [ "$ahora" = "$RESERVA" ]; then
+              echo "sin entrega: libero la reserva"
+              git push -q origin --delete "wip/nube-codex-$TRABAJO"
+            elif [ "$fin" = 0 ]; then echo "SEGUIR=1" >> "$GITHUB_ENV"; fi
+          else
+            despues=$(git ls-remote origin 'refs/heads/wip/nube-codex-*' | wc -l)
+            echo "ramas codex: $despues, antes $antes"
+            if [ "$fin" = 0 ] && [ "$despues" -gt "$antes" ]; then echo "SEGUIR=1" >> "$GITHUB_ENV"; fi
+          fi
       - name: Guardar sesion e informe cifrados
         if: always()
         run: |
           rm -f auth.enc
-          [ -f ~/.codex/auth.json ] && openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:AUTH_KEY -in ~/.codex/auth.json -out auth.enc
+          if [ -f ~/.codex/auth.json ] && [ "$(sha256sum ~/.codex/auth.json | cut -c1-64)" != "$(cat auth0.sha 2>/dev/null)" ]; then
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:AUTH_KEY -in ~/.codex/auth.json -out auth.enc
+            echo "sesion renovada: la guardo"
+          fi
           touch final.txt log.txt
           tar czf - final.txt log.txt | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:AUTH_KEY -out informe.enc
       - uses: actions/cache/save@v4
@@ -79,8 +124,11 @@ jobs:
           name: informe
           path: informe.enc
           retention-days: 7
-      - name: Siguiente ronda enseguida si esta hizo trabajo
+      - name: Rellenar hasta el maximo de agentes
         if: env.SEGUIR == '1'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run ronda.yml -R "$GITHUB_REPOSITORY" -f modelo="$MODELO"
+        run: |
+          vivos=$(gh run list -R "$GITHUB_REPOSITORY" -w ronda.yml -L 200 --json status -q '[.[]|select(.status!="completed")]|length')
+          faltan=$(( MAXIMO - vivos + 1 ))
+          [ "$faltan" -gt 3 ] && faltan=3
+          echo "vivos $vivos, lanzo $faltan"
+          for i in $(seq 1 $faltan); do gh workflow run ronda.yml -R "$GITHUB_REPOSITORY" -f maximo="$MAXIMO"; done
