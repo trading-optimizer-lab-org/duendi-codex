@@ -1,7 +1,7 @@
 name: ronda-codex
 on:
   schedule:
-    - cron: "7 * * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch:
     inputs:
       modelo:
@@ -52,11 +52,15 @@ jobs:
         run: |
           cd w
           if git cat-file -e origin/main:pc/fabrica/PARADA-CODEX 2>/dev/null; then echo "parada"; exit 0; fi
+          antes=$(git ls-remote origin 'refs/heads/wip/nube-codex-*' | wc -l)
           set +e
           codex exec --dangerously-bypass-approvals-and-sandbox -m "$MODELO" -c model_reasoning_effort=medium \
             -o ../final.txt "Lee pc/docs/codex-nube.md en origin/main y haz una ronda siguiendolo al pie de la letra." > ../log.txt 2>&1
-          echo "codex termino con $?"
-          git ls-remote origin 'refs/heads/wip/nube-codex-*' | wc -l | sed 's/^/ramas codex: /'
+          fin=$?
+          echo "codex termino con $fin"
+          despues=$(git ls-remote origin 'refs/heads/wip/nube-codex-*' | wc -l)
+          echo "ramas codex: $despues, antes $antes"
+          if [ "$fin" = 0 ] && [ "$despues" -gt "$antes" ]; then echo "SEGUIR=1" >> "$GITHUB_ENV"; fi
       - name: Guardar sesion e informe cifrados
         if: always()
         run: |
@@ -75,3 +79,8 @@ jobs:
           name: informe
           path: informe.enc
           retention-days: 7
+      - name: Siguiente ronda enseguida si esta hizo trabajo
+        if: env.SEGUIR == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ronda.yml -R "$GITHUB_REPOSITORY" -f modelo="$MODELO"
