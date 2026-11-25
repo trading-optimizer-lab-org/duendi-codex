@@ -63,7 +63,7 @@ jobs:
             c=$(git commit-tree "$base^{tree}" -p "$base" -m "reserva $id")
             if git push -q origin "$c:refs/heads/wip/nube-codex-$id" 2>/dev/null; then
               echo "TRABAJO=$id" >> "$GITHUB_ENV"; echo "RESERVA=$c" >> "$GITHUB_ENV"
-              if [ "$modelo" = luna ]; then echo "MODELO=gpt-6.2-luna" >> "$GITHUB_ENV"; echo "ESFUERZO=max" >> "$GITHUB_ENV"
+              if [ "$modelo" = luna ]; then echo "MODELO=gpt-6-luna" >> "$GITHUB_ENV"; echo "ESFUERZO=max" >> "$GITHUB_ENV"
               else echo "MODELO=gpt-6.2-sol" >> "$GITHUB_ENV"; echo "ESFUERZO=medium" >> "$GITHUB_ENV"; fi
               echo "trabajo: $id, modelo: ${modelo:-sol}"
               exit 0
@@ -86,8 +86,9 @@ jobs:
           fi
           codex exec --dangerously-bypass-approvals-and-sandbox -m "$MODELO" -c model_reasoning_effort="$ESFUERZO" -o ../final.txt "$P" > ../log.txt 2>&1
           fin=$?
-          if [ "$fin" != 0 ] && [ "$MODELO" = gpt-6.2-luna ] && grep -qi 'model' ../log.txt; then
+          if [ "$fin" != 0 ] && [ "$MODELO" = gpt-6-luna ] && grep -qi 'model' ../log.txt; then
             echo "luna no disponible, sigo con sol medium"
+            cp ../log.txt ../log-luna.txt; MODELO=gpt-6.2-sol; ESFUERZO=medium
             codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-6.2-sol -c model_reasoning_effort=medium -o ../final.txt "$P" > ../log.txt 2>&1
             fin=$?
           fi
@@ -112,7 +113,7 @@ jobs:
             echo "sesion renovada: la guardo"
           fi
           touch final.txt log.txt
-          tar czf - final.txt log.txt | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:AUTH_KEY -out informe.enc
+          touch log-luna.txt; tar czf - final.txt log.txt log-luna.txt | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:AUTH_KEY -out informe.enc
       - uses: actions/cache/save@v4
         if: always() && hashFiles('auth.enc') != ''
         with:
